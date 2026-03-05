@@ -1,3 +1,22 @@
+[project]
+name = "dinov2"
+version = "0.0.1"
+description = "DINOv2: Learning Robust Visual Features without Supervision"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+    "omegaconf",
+    "torchmetrics",
+    "fvcore",
+    "iopath",
+    "requests",
+    "opencv-python-headless",
+    "Pillow",
+    "numpy",
+    "scipy",
+]
+
 [tool.black]
 line-length = 120
 
