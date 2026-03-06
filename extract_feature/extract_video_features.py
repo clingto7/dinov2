@@ -23,6 +23,7 @@ Usage:
 import argparse
 import logging
 import math
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -36,6 +37,9 @@ from PIL import Image
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("extract_video_features")
+
+os.environ["ALL_PROXY"] = ""
+os.environ["all_proxy"] = ""
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
@@ -53,10 +57,38 @@ AVAILABLE_MODELS = [
     "dinov2_vitg14_reg",
 ]
 
-# Short, royalty-free sample video
-DEMO_VIDEO_URL = (
-    "https://download.blender.org/peach/bigbuckbunny_movies/BigBuckBunny_320x180.mp4"
-)
+DEMO_VIDEOS = {
+    "kinetics_archery": {
+        "url": "https://huggingface.co/datasets/nateraw/kinetics-mini/resolve/9f4ed38128a355c352527209101be3e326471816/train/archery/-1q7jA3DXQM_000005_000015.mp4",
+        "filename": "kinetics_archery.mp4",
+        "source": "Kinetics-mini (HuggingFace)",
+    },
+    "ucf101_baby_crawling": {
+        "url": "https://huggingface.co/datasets/sayakpaul/ucf101-subset/resolve/b9984b8d2a95e4a1879e1b071e9433858d0bc24a/v_BabyCrawling_g19_c02.avi",
+        "filename": "ucf101_baby_crawling.avi",
+        "source": "UCF101-subset (HuggingFace)",
+    },
+    "ucf101_basketball_dunk": {
+        "url": "https://huggingface.co/datasets/sayakpaul/ucf101-subset/resolve/b9984b8d2a95e4a1879e1b071e9433858d0bc24a/v_BasketballDunk_g14_c06.avi",
+        "filename": "ucf101_basketball_dunk.avi",
+        "source": "UCF101-subset (HuggingFace)",
+    },
+    "lerobot_xarm_bimanual": {
+        "url": "https://huggingface.co/datasets/lerobot/utokyo_xarm_bimanual/resolve/13533b961150faf398ae9b82cf6d6323b56f9070/videos/observation.images.image/chunk-000/file-000.mp4",
+        "filename": "lerobot_xarm_bimanual.mp4",
+        "source": "LeRobot utokyo_xarm_bimanual (HuggingFace)",
+    },
+    "opencv_vtest": {
+        "url": "https://raw.githubusercontent.com/opencv/opencv/fe160f3eed3ec0344baff4bfb6a0771d01b5882d/samples/data/vtest.avi",
+        "filename": "opencv_vtest.avi",
+        "source": "OpenCV samples",
+    },
+    "bigbuckbunny": {
+        "url": "https://download.blender.org/peach/bigbuckbunny_movies/BigBuckBunny_320x180.mp4",
+        "filename": "BigBuckBunny_320x180.mp4",
+        "source": "Blender Foundation (CC-BY)",
+    },
+}
 
 
 def make_transform(resize_size: int = 256, crop_size: int = 224) -> transforms.Compose:
@@ -85,33 +117,59 @@ def load_model(model_name: str, device: torch.device) -> nn.Module:
     return model
 
 
-def download_demo_video(output_dir: Path) -> Path:
-    """Download a demo video for testing."""
+def download_demo_videos(names: list[str], output_dir: Path) -> list[tuple[str, Path]]:
+    """Download demo videos for testing, skipping failed downloads."""
     import requests
 
-    filepath = output_dir / "BigBuckBunny_320x180.mp4"
-    if filepath.exists():
-        logger.info(f"Demo video already exists: {filepath}")
-        return filepath
-    logger.info(f"Downloading demo video from {DEMO_VIDEO_URL}")
-    resp = requests.get(DEMO_VIDEO_URL, timeout=120, stream=True)
-    resp.raise_for_status()
-    total = int(resp.headers.get("content-length", 0))
-    downloaded = 0
-    with open(filepath, "wb") as f:
-        for chunk in resp.iter_content(chunk_size=1024 * 1024):
-            f.write(chunk)
-            downloaded += len(chunk)
-            if total > 0:
-                pct = downloaded / total * 100
-                print(
-                    f"\r  Downloading: {downloaded / 1e6:.1f}/{total / 1e6:.1f} MB ({pct:.0f}%)",
-                    end="",
-                    flush=True,
-                )
-    print()
-    logger.info(f"Downloaded to {filepath}")
-    return filepath
+    output_dir.mkdir(parents=True, exist_ok=True)
+    downloaded_videos: list[tuple[str, Path]] = []
+
+    for idx, name in enumerate(names, start=1):
+        demo = DEMO_VIDEOS[name]
+        filepath = output_dir / demo["filename"]
+
+        if filepath.exists():
+            logger.info(f"[{idx}/{len(names)}] Demo video already exists: {filepath}")
+            downloaded_videos.append((name, filepath))
+            continue
+
+        logger.info(
+            f"[{idx}/{len(names)}] Downloading demo '{name}' from {demo['source']}: {demo['url']}"
+        )
+        try:
+            resp = requests.get(demo["url"], timeout=120, stream=True)
+            resp.raise_for_status()
+            total = int(resp.headers.get("content-length", 0))
+            downloaded = 0
+            with open(filepath, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                    if not chunk:
+                        continue
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if total > 0:
+                        pct = downloaded / total * 100
+                        print(
+                            f"\r  [{idx}/{len(names)}] Downloading {name}: {downloaded / 1e6:.1f}/{total / 1e6:.1f} MB ({pct:.0f}%)",
+                            end="",
+                            flush=True,
+                        )
+                    else:
+                        print(
+                            f"\r  [{idx}/{len(names)}] Downloading {name}: {downloaded / 1e6:.1f} MB",
+                            end="",
+                            flush=True,
+                        )
+            print()
+            logger.info(f"Downloaded to {filepath}")
+            downloaded_videos.append((name, filepath))
+        except Exception as e:
+            print()
+            logger.warning(f"Failed to download demo '{name}': {e}. Skipping.")
+            if filepath.exists():
+                filepath.unlink(missing_ok=True)
+
+    return downloaded_videos
 
 
 def sample_frames(
@@ -289,7 +347,25 @@ def main() -> None:
     parser.add_argument(
         "--demo", action="store_true", help="Download and use a demo video"
     )
+    parser.add_argument(
+        "--demo-names",
+        type=str,
+        default=None,
+        help="Comma-separated demo video names from DEMO_VIDEOS (default: all)",
+    )
+    parser.add_argument(
+        "--demo-count",
+        type=int,
+        default=None,
+        help="Max number of demo videos to process (default: all)",
+    )
     parser.add_argument("--output", type=Path, help="Save features to .pt file")
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="Directory for per-video outputs in multi-demo mode",
+    )
     parser.add_argument(
         "--fps", type=float, default=None, help="Target sampling FPS (default: 1)"
     )
@@ -324,8 +400,275 @@ def main() -> None:
 
     # Get video path
     if args.demo:
-        demo_dir = Path(tempfile.mkdtemp(prefix="dinov2_video_demo_"))
-        video_path = download_demo_video(demo_dir)
+        selected_demo_names = list(DEMO_VIDEOS.keys())
+        if args.demo_names:
+            requested = [x.strip() for x in args.demo_names.split(",") if x.strip()]
+            if not requested:
+                parser.error("--demo-names is empty after parsing")
+            invalid = [name for name in requested if name not in DEMO_VIDEOS]
+            if invalid:
+                parser.error(
+                    f"Unknown demo names: {invalid}. Available demos: {list(DEMO_VIDEOS.keys())}"
+                )
+            selected_demo_names = requested
+
+        if args.demo_count is not None:
+            if args.demo_count <= 0:
+                parser.error("--demo-count must be > 0")
+            selected_demo_names = selected_demo_names[: args.demo_count]
+
+        if not selected_demo_names:
+            parser.error("No demo videos selected")
+
+        demo_dir = args.output_dir or Path(
+            tempfile.mkdtemp(prefix="dinov2_video_demo_")
+        )
+        demo_videos = download_demo_videos(selected_demo_names, demo_dir)
+        if not demo_videos:
+            logger.error("All demo video downloads failed")
+            sys.exit(1)
+
+        if len(demo_videos) > 1:
+            if args.output:
+                logger.warning(
+                    "--output is ignored in multi-demo mode; use --output-dir for per-video outputs"
+                )
+
+            model = load_model(args.model, device)
+            transform = make_transform(args.resize, args.crop)
+
+            demo_results: list[dict] = []
+            for demo_name, video_path in demo_videos:
+                logger.info("\n" + "#" * 80)
+                logger.info(f"Processing demo video: {demo_name} ({video_path.name})")
+                logger.info("#" * 80)
+
+                frames, actual_fps, video_info = sample_frames(
+                    video_path,
+                    target_fps=args.fps,
+                    max_frames=args.max_frames,
+                    start_sec=args.start,
+                    end_sec=args.end,
+                )
+                if not frames:
+                    logger.warning(f"No frames extracted for '{demo_name}', skipping")
+                    continue
+
+                batch = frames_to_batch(frames, transform)
+                logger.info(f"Frame batch shape: {batch.shape}")
+
+                logger.info("=" * 60)
+                logger.info("Extracting features...")
+                logger.info("=" * 60)
+                features = extract_features_batched(
+                    model,
+                    batch,
+                    device,
+                    batch_size=args.batch_size,
+                    intermediate_layers=args.intermediate_layers,
+                )
+
+                cls_features = features["cls_features"]
+                patch_tokens = features["patch_tokens"]
+
+                logger.info("\n" + "=" * 60)
+                logger.info("1. Per-frame Feature Summary")
+                logger.info("=" * 60)
+                print_feature_stats("CLS features (all frames)", cls_features)
+                print_feature_stats("Patch tokens (all frames)", patch_tokens)
+
+                logger.info("\n" + "=" * 60)
+                logger.info("2. Temporal Statistics (across frames)")
+                logger.info("=" * 60)
+
+                temporal_mean = cls_features.mean(dim=0)
+                temporal_var = cls_features.var(dim=0)
+                logger.info(f"  CLS temporal mean (across {len(frames)} frames):")
+                logger.info(f"    mean of means: {temporal_mean.mean().item():.6f}")
+                logger.info(f"    std of means:  {temporal_mean.std().item():.6f}")
+                logger.info("  CLS temporal variance:")
+                logger.info(f"    mean variance: {temporal_var.mean().item():.6f}")
+                logger.info(
+                    "    This measures how much the video content changes over time."
+                )
+
+                consecutive_sim = None
+                if len(frames) > 1:
+                    consecutive_sim = torch.nn.functional.cosine_similarity(
+                        cls_features[:-1], cls_features[1:], dim=-1
+                    )
+                    logger.info(
+                        "\n  Frame-to-frame cosine similarity (temporal smoothness):"
+                    )
+                    logger.info(f"    mean: {consecutive_sim.mean().item():.4f}")
+                    logger.info(f"    min:  {consecutive_sim.min().item():.4f}")
+                    logger.info(f"    max:  {consecutive_sim.max().item():.4f}")
+                    logger.info(f"    std:  {consecutive_sim.std().item():.4f}")
+
+                    threshold = consecutive_sim.mean() - 2 * consecutive_sim.std()
+                    scene_changes = (consecutive_sim < threshold).nonzero(
+                        as_tuple=True
+                    )[0]
+                    if len(scene_changes) > 0:
+                        logger.info(
+                            f"\n  Potential scene changes (sim < {threshold.item():.4f}):"
+                        )
+                        for idx in scene_changes:
+                            logger.info(
+                                f"    Frame {idx.item()} -> {idx.item() + 1}: sim={consecutive_sim[idx].item():.4f}"
+                            )
+                    else:
+                        logger.info(
+                            f"\n  No scene changes detected (all consecutive sims > {threshold.item():.4f})"
+                        )
+
+                logger.info("\n" + "=" * 60)
+                logger.info("3. Spatial Statistics (per frame)")
+                logger.info("=" * 60)
+
+                patch_var_per_frame = patch_tokens.var(dim=1).mean(dim=-1)
+                logger.info("  Patch token variance per frame (spatial diversity):")
+                logger.info(f"    mean: {patch_var_per_frame.mean().item():.6f}")
+                logger.info(f"    std:  {patch_var_per_frame.std().item():.6f}")
+                logger.info(
+                    f"    min:  {patch_var_per_frame.min().item():.6f} (frame {patch_var_per_frame.argmin().item()})"
+                )
+                logger.info(
+                    f"    max:  {patch_var_per_frame.max().item():.6f} (frame {patch_var_per_frame.argmax().item()})"
+                )
+
+                if args.intermediate_layers > 0:
+                    logger.info("\n" + "=" * 60)
+                    logger.info(
+                        f"4. Intermediate Layer Features (last {args.intermediate_layers} layers)"
+                    )
+                    logger.info("=" * 60)
+                    for layer_idx in range(args.intermediate_layers):
+                        inter_cls = features["intermediate_cls"][layer_idx]
+                        inter_patches = features["intermediate_patches"][layer_idx]
+                        logger.info(f"  Layer {layer_idx}:")
+                        print_feature_stats("    CLS", inter_cls)
+                        print_feature_stats("    Patches", inter_patches)
+                        inter_var = inter_cls.var(dim=0).mean()
+                        logger.info(
+                            f"    Temporal CLS variance: {inter_var.item():.6f}"
+                        )
+
+                logger.info("\n" + "=" * 60)
+                logger.info("5. Video-level Summary")
+                logger.info("=" * 60)
+                logger.info(f"  Video: {video_path.name}")
+                logger.info(f"  Duration: {video_info['duration_sec']:.1f}s")
+                logger.info(f"  Frames extracted: {len(frames)}")
+                logger.info(f"  Effective FPS: {actual_fps:.1f}")
+                logger.info(f"  Feature dim: {cls_features.shape[-1]}")
+                logger.info(f"  Patches per frame: {patch_tokens.shape[1]}")
+                logger.info(
+                    f"  Total feature variance: {temporal_var.mean().item():.6f}"
+                )
+                if consecutive_sim is not None:
+                    logger.info(
+                        f"  Temporal smoothness (mean cos sim): {consecutive_sim.mean().item():.4f}"
+                    )
+                logger.info("\n  These metrics can be used for data selection:")
+                logger.info("    - Feature variance -> content diversity of this video")
+                logger.info("    - Temporal smoothness -> motion/change rate")
+                logger.info("    - Spatial diversity -> scene complexity per frame")
+
+                demo_results.append(
+                    {
+                        "name": demo_name,
+                        "video_path": str(video_path),
+                        "video_info": video_info,
+                        "n_frames": len(frames),
+                        "effective_fps": actual_fps,
+                        "cls_features": cls_features,
+                        "patch_tokens": patch_tokens,
+                        "temporal_mean": temporal_mean,
+                        "temporal_var": temporal_var,
+                        "intermediate_cls": features.get("intermediate_cls", None),
+                        "intermediate_patches": features.get(
+                            "intermediate_patches", None
+                        ),
+                    }
+                )
+
+                if args.output_dir:
+                    save_dict = {
+                        "model": args.model,
+                        "demo_name": demo_name,
+                        "video_path": str(video_path),
+                        "video_info": video_info,
+                        "n_frames": len(frames),
+                        "effective_fps": actual_fps,
+                        "cls_features": cls_features,
+                        "patch_tokens": patch_tokens,
+                        "temporal_mean": temporal_mean,
+                        "temporal_var": temporal_var,
+                    }
+                    if args.intermediate_layers > 0:
+                        save_dict["intermediate_cls"] = features["intermediate_cls"]
+                        save_dict["intermediate_patches"] = features[
+                            "intermediate_patches"
+                        ]
+                    per_video_output = args.output_dir / f"{demo_name}_features.pt"
+                    torch.save(save_dict, per_video_output)
+                    logger.info(f"Saved features to {per_video_output}")
+
+            if not demo_results:
+                logger.error("No demo videos were successfully processed")
+                sys.exit(1)
+
+            if len(demo_results) > 1:
+                video_names = [result["name"] for result in demo_results]
+                embeddings = torch.stack(
+                    [result["temporal_mean"] for result in demo_results], dim=0
+                )
+                embeddings = torch.nn.functional.normalize(embeddings, dim=-1)
+                similarity = embeddings @ embeddings.T
+
+                logger.info("\n" + "=" * 80)
+                logger.info(
+                    "Inter-video Pairwise Cosine Similarity (temporal_mean embeddings)"
+                )
+                logger.info("=" * 80)
+
+                max_name_len = max(len(name) for name in video_names)
+                col_width = 13
+                header = " " * (max_name_len + 2) + "".join(
+                    [f"{name[: col_width - 1]:>{col_width}}" for name in video_names]
+                )
+                logger.info(header)
+                for i, name in enumerate(video_names):
+                    row_values = "".join(
+                        [
+                            f"{similarity[i, j].item():>{col_width}.4f}"
+                            for j in range(len(video_names))
+                        ]
+                    )
+                    logger.info(f"{name:<{max_name_len}}  {row_values}")
+
+                if args.output_dir:
+                    summary_path = args.output_dir / "summary.pt"
+                    torch.save(
+                        {
+                            "model": args.model,
+                            "video_names": video_names,
+                            "similarity_matrix": similarity,
+                            "temporal_mean_embeddings": embeddings,
+                            "fps": args.fps,
+                            "max_frames": args.max_frames,
+                            "start": args.start,
+                            "end": args.end,
+                        },
+                        summary_path,
+                    )
+                    logger.info(f"Saved multi-video summary to {summary_path}")
+
+            logger.info("\nDone.")
+            return
+
+        video_path = demo_videos[0][1]
     elif args.video:
         video_path = args.video
         if not video_path.exists():
@@ -387,16 +730,17 @@ def main() -> None:
     logger.info(f"  CLS temporal mean (across {len(frames)} frames):")
     logger.info(f"    mean of means: {temporal_mean.mean().item():.6f}")
     logger.info(f"    std of means:  {temporal_mean.std().item():.6f}")
-    logger.info(f"  CLS temporal variance:")
+    logger.info("  CLS temporal variance:")
     logger.info(f"    mean variance: {temporal_var.mean().item():.6f}")
-    logger.info(f"    This measures how much the video content changes over time.")
+    logger.info("    This measures how much the video content changes over time.")
 
     # Frame-to-frame cosine similarity (temporal smoothness)
+    consecutive_sim = None
     if len(frames) > 1:
         consecutive_sim = torch.nn.functional.cosine_similarity(
             cls_features[:-1], cls_features[1:], dim=-1
         )
-        logger.info(f"\n  Frame-to-frame cosine similarity (temporal smoothness):")
+        logger.info("\n  Frame-to-frame cosine similarity (temporal smoothness):")
         logger.info(f"    mean: {consecutive_sim.mean().item():.4f}")
         logger.info(f"    min:  {consecutive_sim.min().item():.4f}")
         logger.info(f"    max:  {consecutive_sim.max().item():.4f}")
@@ -423,7 +767,7 @@ def main() -> None:
 
     # Patch variance per frame
     patch_var_per_frame = patch_tokens.var(dim=1).mean(dim=-1)  # [N]
-    logger.info(f"  Patch token variance per frame (spatial diversity):")
+    logger.info("  Patch token variance per frame (spatial diversity):")
     logger.info(f"    mean: {patch_var_per_frame.mean().item():.6f}")
     logger.info(f"    std:  {patch_var_per_frame.std().item():.6f}")
     logger.info(
@@ -444,8 +788,8 @@ def main() -> None:
             inter_cls = features["intermediate_cls"][layer_idx]
             inter_patches = features["intermediate_patches"][layer_idx]
             logger.info(f"  Layer {layer_idx}:")
-            print_feature_stats(f"    CLS", inter_cls)
-            print_feature_stats(f"    Patches", inter_patches)
+            print_feature_stats("    CLS", inter_cls)
+            print_feature_stats("    Patches", inter_patches)
             inter_var = inter_cls.var(dim=0).mean()
             logger.info(f"    Temporal CLS variance: {inter_var.item():.6f}")
 
@@ -460,14 +804,14 @@ def main() -> None:
     logger.info(f"  Feature dim: {cls_features.shape[-1]}")
     logger.info(f"  Patches per frame: {patch_tokens.shape[1]}")
     logger.info(f"  Total feature variance: {temporal_var.mean().item():.6f}")
-    if len(frames) > 1:
+    if consecutive_sim is not None:
         logger.info(
             f"  Temporal smoothness (mean cos sim): {consecutive_sim.mean().item():.4f}"
         )
-    logger.info(f"\n  These metrics can be used for data selection:")
-    logger.info(f"    - Feature variance -> content diversity of this video")
-    logger.info(f"    - Temporal smoothness -> motion/change rate")
-    logger.info(f"    - Spatial diversity -> scene complexity per frame")
+    logger.info("\n  These metrics can be used for data selection:")
+    logger.info("    - Feature variance -> content diversity of this video")
+    logger.info("    - Temporal smoothness -> motion/change rate")
+    logger.info("    - Spatial diversity -> scene complexity per frame")
 
     # ── Save ──
     if args.output:
