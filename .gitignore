@@ -9,3 +9,7 @@ dist/
 *.swp
 
 .vscode/
+
+# Local datasets and analysis outputs (managed by extract_feature scripts)
+extract_feature/local_datasets/
+extract_feature/outputs/
