@@ -2,7 +2,7 @@
 
 ## 概述
 
-使用 DINOv2 预训练模型从图像和视频中提取视觉特征的工具脚本集。包含基础特征提取、子集多样性分析、可视化绘图、本地数据集管理等功能。用于 VLA 数据集分析、数据多样性评估、数据选取 pipeline 等。
+使用 DINOv2 预训练模型从图像和视频中提取视觉特征的工具脚本集。包含基础特征提取、子集多样性分析、可视化绘图、本地数据集管理等功能。还包含 RoboTwin VLA 数据集的加载器、episode 多样性分析和基于多样性的数据选择 pipeline。用于 VLA 数据集分析、数据多样性评估、数据选取 baseline 等。
 
 ## 文件
 
@@ -19,6 +19,14 @@
 |------|------|---------|
 | `analyze_image_subset_diversity.py` | 对图片集合生成子集，计算多样性指标，输出CSV+图表 | `--image-dir`, `--demo`, `--subset-size`, `--n-subsets`, `--strategy`, `--output-dir` |
 | `analyze_video_subset_diversity.py` | 对视频集合生成子集，以temporal mean作为视频嵌入，同上分析 | `--video-dir`, `--demo`, `--subset-size`, `--n-subsets`, `--strategy`, `--fps`, `--max-frames`, `--output-dir` |
+
+### RoboTwin VLA 数据集工具
+
+| 文件 | 功能 | 关键参数 |
+|------|------|---------|
+| `robotwin_loader.py` | RoboTwin-LeRobot-v3.0 数据加载器：元数据解析、视频下载、episode 帧提取（AV1 via PyAV） | `--list-tasks`, `--task`, `--variant`, `--extract-episode`, `--target-fps`, `--max-frames` |
+| `analyze_robotwin_diversity.py` | 对 RoboTwin task 的 episode 子集进行多样性分析：提取 DINOv2 CLS 特征 → temporal mean 嵌入 → 子集指标 | `--task`, `--demo`, `--subset-size`, `--n-subsets`, `--camera`, `--target-fps`, `--max-frames`, `--output-dir` |
+| `select_episodes.py` | 基于多样性的 episode 选择：4种策略（greedy_maxdist, greedy_maxvar, kmeans, random）+ 策略对比 | `--features`, `--task`, `--demo`, `--n-select`, `--strategy`, `--compare-all`, `--output-dir` |
 
 ### 工具模块
 
@@ -90,6 +98,30 @@ XFORMERS_DISABLED=1 PYTHONPATH=/home/m1zu/ws/dinov2 uv run python extract_featur
 
 # 只下载图片
 XFORMERS_DISABLED=1 PYTHONPATH=/home/m1zu/ws/dinov2 uv run python extract_feature/manage_local_datasets.py --download images
+
+# ====== RoboTwin VLA 数据集 ======
+# 注意: RoboTwin 命令需要取消 SOCKS 代理 (env -u ALL_PROXY -u all_proxy)
+
+# 列出所有可用 task (50个)
+env -u ALL_PROXY -u all_proxy XFORMERS_DISABLED=1 PYTHONPATH=/home/m1zu/ws/dinov2 uv run python extract_feature/robotwin_loader.py --list-tasks
+
+# 查看某 task 元数据
+env -u ALL_PROXY -u all_proxy XFORMERS_DISABLED=1 PYTHONPATH=/home/m1zu/ws/dinov2 uv run python extract_feature/robotwin_loader.py --task beat_block_hammer --variant clean
+
+# 提取某 episode 的帧
+env -u ALL_PROXY -u all_proxy XFORMERS_DISABLED=1 PYTHONPATH=/home/m1zu/ws/dinov2 uv run python extract_feature/robotwin_loader.py --task beat_block_hammer --extract-episode 0 --target-fps 2 --max-frames 5 --output-dir extract_feature/outputs/robotwin_frames
+
+# RoboTwin episode 多样性分析 - demo 模式 (beat_block_hammer, 前10个episode)
+env -u ALL_PROXY -u all_proxy XFORMERS_DISABLED=1 PYTHONPATH=/home/m1zu/ws/dinov2 uv run python extract_feature/analyze_robotwin_diversity.py --demo --subset-size 3 --n-subsets 5 --output-dir extract_feature/outputs/robotwin_diversity_demo
+
+# RoboTwin episode 多样性分析 - 指定 task
+env -u ALL_PROXY -u all_proxy XFORMERS_DISABLED=1 PYTHONPATH=/home/m1zu/ws/dinov2 uv run python extract_feature/analyze_robotwin_diversity.py --task beat_block_hammer --variant clean --n-episodes 20 --subset-size 5 --n-subsets 10 --output-dir extract_feature/outputs/robotwin_diversity
+
+# Episode 选择 - 从预计算特征 (先跑 analyze_robotwin_diversity.py)
+env -u ALL_PROXY -u all_proxy XFORMERS_DISABLED=1 PYTHONPATH=/home/m1zu/ws/dinov2 uv run python extract_feature/select_episodes.py --features extract_feature/outputs/robotwin_diversity_demo/features_and_metrics.pt --n-select 5 --strategy greedy_maxdist --compare-all --output-dir extract_feature/outputs/robotwin_selection
+
+# Episode 选择 - demo 模式 (standalone, 自动提取特征)
+env -u ALL_PROXY -u all_proxy XFORMERS_DISABLED=1 PYTHONPATH=/home/m1zu/ws/dinov2 uv run python extract_feature/select_episodes.py --demo --n-select 5 --strategy greedy_maxdist --compare-all --output-dir extract_feature/outputs/robotwin_selection_demo
 ```
 
 ## 架构
@@ -143,6 +175,19 @@ analyze_video_subset_diversity.py
   ├── subset_sampling.py
   └── plotting_utils.py
 
+analyze_robotwin_diversity.py
+  ├── extract_video_features.py  (模型加载/特征提取)
+  ├── robotwin_loader.py         (RoboTwin元数据/视频下载/帧提取)
+  ├── diversity_metrics.py
+  ├── subset_sampling.py
+  └── plotting_utils.py
+
+select_episodes.py
+  ├── extract_video_features.py  (模型加载/特征提取)
+  ├── robotwin_loader.py         (RoboTwin数据加载)
+  ├── diversity_metrics.py
+  └── plotting_utils.py
+
 manage_local_datasets.py
   ├── extract_image_features.py  (DEMO_URLS)
   └── extract_video_features.py  (DEMO_VIDEOS)
@@ -183,13 +228,24 @@ manage_local_datasets.py
 ### 多样性分析 (输出目录)
 
 ```
-output_dir/
+output_dir/  (analyze_*_diversity.py)
   ├── metrics.csv                # 每行一个子集的指标
   ├── metric_histograms.png      # 指标分布直方图
   ├── metric_boxplots.png        # 指标箱线图
   ├── pca_scatter.png            # 全数据集 PCA 2D 散点图
   ├── similarity_heatmap.png     # 全数据集两两余弦相似度热力图
   └── features_and_metrics.pt    # 完整特征 + 指标 (torch 格式)
+```
+
+### Episode 选择 (输出目录)
+
+```
+output_dir/  (select_episodes.py)
+  ├── selection_results.csv      # 每行一个策略的选择结果和指标
+  ├── selected_episodes.json     # 每个策略选中的 episode ID 列表 (机器可读)
+  ├── pca_scatter.png            # PCA 散点图，选中 episode 带 * 标记
+  ├── similarity_heatmap.png     # 全数据集两两余弦相似度热力图
+  └── selection_data.pt          # 完整嵌入 + 选择结果 (torch 格式)
 ```
 
 ## 目录结构
@@ -202,6 +258,9 @@ extract_feature/
   ├── extract_video_features.py           # 视频特征提取 (含多视频demo)
   ├── analyze_image_subset_diversity.py   # 图像子集多样性分析
   ├── analyze_video_subset_diversity.py   # 视频子集多样性分析
+  ├── robotwin_loader.py                  # RoboTwin 数据加载器 (HF Hub + PyAV)
+  ├── analyze_robotwin_diversity.py       # RoboTwin episode 多样性分析
+  ├── select_episodes.py                  # 基于多样性的 episode 选择 (4种策略)
   ├── diversity_metrics.py                # 多样性指标计算
   ├── subset_sampling.py                  # 子集采样策略
   ├── plotting_utils.py                   # 可视化工具
@@ -221,3 +280,15 @@ extract_feature/
 - `local_datasets/` 和 `outputs/` 已在 `.gitignore` 中排除
 - 所有脚本需通过 `PYTHONPATH=/home/m1zu/ws/dinov2` 运行以解析导入
 - matplotlib 用于可视化，已加入 `pyproject.toml` 依赖
+
+## RoboTwin 数据集说明
+
+- **数据源**: `hxma/RoboTwin-LeRobot-v3.0` (HuggingFace)，50 个机器人操作 task
+- **格式**: LeRobot v3.0 格式，episode 边界存储在 parquet 文件中，视频为 AV1 编码的 MP4（所有 episode 拼接在一个文件中）
+- **视频解码**: 必须使用 PyAV（OpenCV 不支持 AV1），帧返回为 PIL.Image.Image (RGB)
+- **variant**: `clean`（50个demo）或 `randomized`（500个demo）
+- **camera**: 3 个视角：`cam_high`, `cam_left_wrist`, `cam_right_wrist`
+- **HF 缓存**: 下载的视频/元数据缓存在 `~/.cache/huggingface/hub/datasets--hxma--RoboTwin-LeRobot-v3.0/`
+- **Episode 嵌入**: 每个 episode 提取帧 → DINOv2 CLS 特征 [N_frames, D] → temporal mean → [D]
+- **选择策略**: `greedy_maxdist`（最大化最小距离）, `greedy_maxvar`（最大化方差）, `kmeans`（聚类中心选择）, `random`（随机基线）
+- **Diversity ratio**: 选中子集的 cosine distance / 全集的 cosine distance，>1.0 说明选中的子集多样性高于全集平均
