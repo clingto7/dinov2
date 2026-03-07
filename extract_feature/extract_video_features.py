@@ -35,6 +35,13 @@ import torch.nn as nn
 from torchvision import transforms
 from PIL import Image
 
+try:
+    import av
+
+    _HAS_PYAV = True
+except ImportError:
+    _HAS_PYAV = False
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("extract_video_features")
 
@@ -172,26 +179,17 @@ def download_demo_videos(names: list[str], output_dir: Path) -> list[tuple[str, 
     return downloaded_videos
 
 
-def sample_frames(
+def _sample_frames_opencv(
     video_path: Path,
     target_fps: float | None = None,
     max_frames: int | None = None,
     start_sec: float = 0.0,
     end_sec: float | None = None,
-) -> tuple[list[np.ndarray], float, dict]:
-    """Sample frames from a video file.
+) -> tuple[list[np.ndarray], float, dict, bool]:
+    """Sample frames using OpenCV (cv2.VideoCapture).
 
-    Args:
-        video_path: Path to video file
-        target_fps: Target sampling FPS (None = use all frames)
-        max_frames: Maximum number of frames to extract
-        start_sec: Start time in seconds
-        end_sec: End time in seconds (None = end of video)
-
-    Returns:
-        frames: List of BGR numpy arrays
-        actual_fps: The effective sampling rate
-        info: Video metadata dict
+    Returns BGR numpy arrays.  Returns (frames, actual_fps, info, is_rgb).
+    is_rgb is always False for OpenCV (frames are BGR).
     """
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
@@ -248,18 +246,192 @@ def sample_frames(
     cap.release()
 
     actual_fps = len(frames) / (end_sec - start_sec) if (end_sec - start_sec) > 0 else 0
-    logger.info(f"Extracted {len(frames)} frames")
-    return frames, actual_fps, info
+    logger.info(f"Extracted {len(frames)} frames (OpenCV)")
+    return frames, actual_fps, info, False
+
+
+def _sample_frames_pyav(
+    video_path: Path,
+    target_fps: float | None = None,
+    max_frames: int | None = None,
+    start_sec: float = 0.0,
+    end_sec: float | None = None,
+) -> tuple[list[np.ndarray], float, dict, bool]:
+    """Sample frames using PyAV (supports AV1 via libdav1d).
+
+    Returns RGB numpy arrays.  Returns (frames, actual_fps, info, is_rgb).
+    is_rgb is always True for PyAV.
+    """
+    container = av.open(str(video_path))
+    stream = container.streams.video[0]
+    avg_rate = stream.average_rate
+    time_base = stream.time_base
+    video_fps = float(avg_rate) if avg_rate is not None else 30.0
+    total_frames = stream.frames if stream.frames > 0 else 0
+    codec_name = stream.codec_context.name if stream.codec_context else "unknown"
+
+    # Get dimensions
+    width = stream.codec_context.width if stream.codec_context else 0
+    height = stream.codec_context.height if stream.codec_context else 0
+
+    # Calculate duration
+    if stream.duration is not None and time_base is not None:
+        duration = float(stream.duration * time_base)
+    elif total_frames > 0 and video_fps > 0:
+        duration = total_frames / video_fps
+    else:
+        duration = 0.0
+
+    # If total_frames is unknown, estimate from duration
+    if total_frames == 0 and duration > 0 and video_fps > 0:
+        total_frames = int(duration * video_fps)
+
+    info = {
+        "video_fps": video_fps,
+        "total_frames": total_frames,
+        "width": width,
+        "height": height,
+        "duration_sec": duration,
+        "codec": codec_name,
+    }
+    logger.info(
+        f"Video: {video_path.name} | {width}x{height} | {video_fps:.1f} FPS | "
+        f"{total_frames} frames | {duration:.1f}s | codec={codec_name} (PyAV)"
+    )
+
+    if end_sec is None:
+        end_sec = duration
+
+    # Calculate frame sampling interval
+    if target_fps is not None and target_fps < video_fps:
+        frame_interval = video_fps / target_fps
+    else:
+        frame_interval = 1.0
+
+    # Calculate expected frame count for logging
+    available_duration = end_sec - start_sec
+    if available_duration <= 0:
+        container.close()
+        return [], 0.0, info, True
+
+    expected_frames = int(available_duration * video_fps / frame_interval)
+    if max_frames is not None:
+        expected_frames = min(expected_frames, max_frames)
+    logger.info(
+        f"Sampling up to {expected_frames} frames (effective FPS: "
+        f"{expected_frames / available_duration:.1f})"
+    )
+
+    # Seek to start_sec if needed
+    if start_sec > 0 and time_base is not None:
+        target_pts = int(start_sec / time_base)
+        container.seek(target_pts, stream=stream)
+
+    frames: list[np.ndarray] = []
+    frame_count = 0
+    next_sample_at = 0.0
+
+    for frame in container.decode(video=0):
+        if frame.pts is None or time_base is None:
+            # Fallback: count frames sequentially
+            frame_time = frame_count / video_fps
+        else:
+            frame_time = float(frame.pts * time_base)
+
+        # Skip frames before start
+        if frame_time < start_sec - 0.001:
+            continue
+
+        # Stop at end
+        if frame_time >= end_sec + 0.001:
+            break
+
+        # Subsample based on target FPS
+        if frame_count >= next_sample_at:
+            arr = frame.to_ndarray(format="rgb24")  # [H, W, 3] uint8 RGB
+            frames.append(arr)
+            next_sample_at += frame_interval
+
+            if max_frames is not None and len(frames) >= max_frames:
+                break
+
+        frame_count += 1
+
+    container.close()
+
+    actual_fps = len(frames) / available_duration if available_duration > 0 else 0.0
+    logger.info(f"Extracted {len(frames)} frames (PyAV)")
+    return frames, actual_fps, info, True
+
+
+def sample_frames(
+    video_path: Path,
+    target_fps: float | None = None,
+    max_frames: int | None = None,
+    start_sec: float = 0.0,
+    end_sec: float | None = None,
+) -> tuple[list[np.ndarray], float, dict, bool]:
+    """Sample frames from a video file.
+
+    Tries OpenCV first for speed. If OpenCV extracts 0 frames (e.g. AV1 codec
+    not supported), automatically falls back to PyAV which supports AV1 via
+    libdav1d.
+
+    Args:
+        video_path: Path to video file
+        target_fps: Target sampling FPS (None = use all frames)
+        max_frames: Maximum number of frames to extract
+        start_sec: Start time in seconds
+        end_sec: End time in seconds (None = end of video)
+
+    Returns:
+        frames: List of numpy arrays (BGR if OpenCV, RGB if PyAV)
+        actual_fps: The effective sampling rate
+        info: Video metadata dict
+        is_rgb: True if frames are RGB (PyAV), False if BGR (OpenCV)
+    """
+    # Try OpenCV first
+    try:
+        frames, actual_fps, info, is_rgb = _sample_frames_opencv(
+            video_path, target_fps, max_frames, start_sec, end_sec
+        )
+        if frames:
+            return frames, actual_fps, info, is_rgb
+        # OpenCV opened the file but extracted 0 frames — likely codec issue
+        logger.warning(
+            f"OpenCV extracted 0 frames from {video_path.name}. "
+            "Falling back to PyAV (likely unsupported codec like AV1)."
+        )
+    except RuntimeError:
+        logger.warning(f"OpenCV cannot open {video_path.name}. Falling back to PyAV.")
+
+    # Fallback to PyAV
+    if not _HAS_PYAV:
+        raise RuntimeError(
+            f"Cannot decode {video_path.name}: OpenCV failed and PyAV is not installed. "
+            "Install with: uv add av"
+        )
+
+    return _sample_frames_pyav(video_path, target_fps, max_frames, start_sec, end_sec)
 
 
 def frames_to_batch(
-    frames: list[np.ndarray], transform: transforms.Compose
+    frames: list[np.ndarray], transform: transforms.Compose, is_rgb: bool = False
 ) -> torch.Tensor:
-    """Convert BGR numpy frames to a transformed batch tensor."""
+    """Convert numpy frames to a transformed batch tensor.
+
+    Args:
+        frames: List of numpy arrays (BGR from OpenCV, or RGB from PyAV).
+        transform: Torchvision transform pipeline.
+        is_rgb: If True, frames are already RGB (PyAV). If False, BGR (OpenCV).
+    """
     tensors = []
     for frame in frames:
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        pil_img = Image.fromarray(rgb)
+        if is_rgb:
+            pil_img = Image.fromarray(frame)
+        else:
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            pil_img = Image.fromarray(rgb)
         tensors.append(transform(pil_img))
     return torch.stack(tensors)
 
@@ -443,7 +615,7 @@ def main() -> None:
                 logger.info(f"Processing demo video: {demo_name} ({video_path.name})")
                 logger.info("#" * 80)
 
-                frames, actual_fps, video_info = sample_frames(
+                frames, actual_fps, video_info, is_rgb = sample_frames(
                     video_path,
                     target_fps=args.fps,
                     max_frames=args.max_frames,
@@ -454,7 +626,7 @@ def main() -> None:
                     logger.warning(f"No frames extracted for '{demo_name}', skipping")
                     continue
 
-                batch = frames_to_batch(frames, transform)
+                batch = frames_to_batch(frames, transform, is_rgb=is_rgb)
                 logger.info(f"Frame batch shape: {batch.shape}")
 
                 logger.info("=" * 60)
@@ -678,7 +850,7 @@ def main() -> None:
         parser.error("Provide --video or --demo")
 
     # Sample frames
-    frames, actual_fps, video_info = sample_frames(
+    frames, actual_fps, video_info, is_rgb = sample_frames(
         video_path,
         target_fps=args.fps,
         max_frames=args.max_frames,
@@ -694,7 +866,7 @@ def main() -> None:
     transform = make_transform(args.resize, args.crop)
 
     # Transform frames
-    batch = frames_to_batch(frames, transform)
+    batch = frames_to_batch(frames, transform, is_rgb=is_rgb)
     logger.info(f"Frame batch shape: {batch.shape}")
 
     # Extract features
