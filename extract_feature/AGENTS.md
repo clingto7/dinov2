@@ -11,7 +11,7 @@
 | 文件 | 功能 | 关键参数 |
 |------|------|---------|
 | `extract_image_features.py` | 从图片批量提取 CLS/patch/中间层特征 | `--model`, `--image-dir`, `--demo`, `--output`, `--intermediate-layers` |
-| `extract_video_features.py` | 从视频逐帧提取特征 + 时序/空间分析，支持多视频demo和视频间相似度矩阵 | `--model`, `--video`, `--demo`, `--demo-names`, `--demo-count`, `--fps`, `--max-frames`, `--output`, `--output-dir` |
+| `extract_video_features.py` | 从视频逐帧提取特征 + 时序/空间分析，支持多视频demo和视频间相似度矩阵。AV1 视频自动通过 PyAV 回退解码 | `--model`, `--video`, `--demo`, `--demo-names`, `--demo-count`, `--fps`, `--max-frames`, `--output`, `--output-dir` |
 
 ### 子集多样性分析脚本
 
@@ -137,6 +137,22 @@ env -u ALL_PROXY -u all_proxy XFORMERS_DISABLED=1 PYTHONPATH=/home/m1zu/ws/dinov
    - `model.get_intermediate_layers(x, n=k)` → 中间层特征
 4. **统计分析**: 特征方差（数据多样性）、余弦相似度（帧间相似性/场景变化）
 
+### 视频帧采样与 AV1 回退
+
+`extract_video_features.py` 的 `sample_frames()` 函数实现了双后端采样策略：
+
+1. **`_sample_frames_opencv()`**: 默认路径，使用 OpenCV `cv2.VideoCapture`，返回 BGR 帧 (numpy array)
+2. **`_sample_frames_pyav()`**: 回退路径，使用 PyAV `av.open()`，返回 RGB 帧 (numpy array)
+3. **`sample_frames()`**: 调度器 — 先 OpenCV，若获取 0 帧则自动切换 PyAV
+
+返回值为 4-tuple: `(frames, actual_fps, info, is_rgb)`
+- `is_rgb=False`: OpenCV 路径，帧为 BGR 格式
+- `is_rgb=True`: PyAV 路径，帧已为 RGB 格式
+
+`frames_to_batch()` 接受 `is_rgb` 参数，当 `is_rgb=True` 时跳过 BGR→RGB 转换。
+
+**典型场景**: H.264/MJPEG 视频走 OpenCV，AV1 视频（如 LeRobot/RoboTwin）自动走 PyAV。
+
 ### 多样性分析流程
 
 ```
@@ -255,7 +271,7 @@ extract_feature/
   ├── AGENTS.md                           # 本文件
   ├── GUIDE.md                            # 详细使用指南
   ├── extract_image_features.py           # 图像特征提取
-  ├── extract_video_features.py           # 视频特征提取 (含多视频demo)
+  ├── extract_video_features.py           # 视频特征提取 (含多视频demo, AV1 PyAV 回退)
   ├── analyze_image_subset_diversity.py   # 图像子集多样性分析
   ├── analyze_video_subset_diversity.py   # 视频子集多样性分析
   ├── robotwin_loader.py                  # RoboTwin 数据加载器 (HF Hub + PyAV)
@@ -280,6 +296,7 @@ extract_feature/
 - `local_datasets/` 和 `outputs/` 已在 `.gitignore` 中排除
 - 所有脚本需通过 `PYTHONPATH=/home/m1zu/ws/dinov2` 运行以解析导入
 - matplotlib 用于可视化，已加入 `pyproject.toml` 依赖
+- AV1 视频回退: `extract_video_features.py` 的 `sample_frames()` 先尝试 OpenCV，若解码 0 帧则自动切换 PyAV (libdav1d)。返回值为 4-tuple `(frames, actual_fps, info, is_rgb)`，`is_rgb=True` 表示帧已是 RGB（无需 BGR→RGB 转换）。调用者需将 `is_rgb` 传给 `frames_to_batch()`。
 
 ## RoboTwin 数据集说明
 
